@@ -518,13 +518,21 @@ function drawTree(t,alpha){
 // ══════════════════════════════════════════════════════
 //  SPRITE RENDERER
 // ══════════════════════════════════════════════════════
-function renderSprite(cls,size=40){
-  const color=CLASSES[cls]?.color||'#888888';
-  const px=Math.max(2,Math.floor(size/14));
-  const cv=getPixelSprite(cls,color,px);
-  if(cv)return cv;
+function renderSprite(cls, size = 40, colorOverride = null) {
+  const color = colorOverride || CLASSES[cls]?.color || '#888888';
+  const px = Math.max(2, Math.floor(size / 14));
+  const cv = getPixelSprite(cls, color, px);
+  if (cv) {
+    // Return a NEW canvas copying the cached one to allow multiple instances in DOM
+    const copy = document.createElement('canvas');
+    copy.width = cv.width;
+    copy.height = cv.height;
+    copy.style.imageRendering = 'pixelated';
+    copy.getContext('2d').drawImage(cv, 0, 0);
+    return copy;
+  }
   // fallback blank canvas
-  const fb=document.createElement('canvas');fb.width=size;fb.height=size;return fb;
+  const fb = document.createElement('canvas'); fb.width = size; fb.height = size; return fb;
 }
 
 // ══════════════════════════════════════════════════════
@@ -534,8 +542,10 @@ const bCv=document.getElementById('boardCanvas'),bCtx=bCv.getContext('2d');
 let board={tiles:[],connections:{},forks:[],startTile:0};
 // Tile size: square tiles now (TS = half-size)
 const TS=34, TH=0;
-// Pan state
+// Pan & zoom state
 let panX=0,panY=0,panStartX=0,panStartY=0,isPanning=false,panMoved=false;
+let zoom=1.0;
+const ZOOM_MIN=0.25,ZOOM_MAX=3.5;
 
 function resizeBoard(){
   bCv.width=window.innerWidth;
@@ -544,80 +554,171 @@ function resizeBoard(){
 
 function genBoard(){
   resizeBoard();
-  const W=bCv.width, H=bCv.height;
   let tiles=[], conns={};
-  const mkT=(x,y,type)=>{tiles.push({x,y,type,id:tiles.length});return tiles.length-1;};
+  const grid=new Map();
+
+  // Pixel spacing (= tile display size so tiles touch when adjacent in grid)
+  const TW=80, TH=60;
+
+  const mkT=(gx,gy,type='normal')=>{
+    const key=`${gx},${gy}`;
+    if(grid.has(key)) return grid.get(key);
+    const id=tiles.length;
+    tiles.push({gx,gy,x:gx*TW,y:gy*TH,type,id});
+    grid.set(key,id);
+    return id;
+  };
+
   const conn=(a,b)=>{
+    if(a===undefined||b===undefined||a===b)return;
     if(!conns[a])conns[a]=[];if(!conns[b])conns[b]=[];
     if(!conns[a].includes(b))conns[a].push(b);
     if(!conns[b].includes(a))conns[b].push(a);
   };
-  const rnd=arr=>arr[Math.floor(Math.random()*arr.length)];
-  const pickT=prog=>{
-    if(prog<0.35)return rnd(['normal','normal','normal','town','shop','quest']);
-    if(prog<0.70)return rnd(['normal','normal','town','quest','mainquest','miniboss']);
-    return rnd(['normal','quest','mainquest','miniboss','boss']);
+
+  const DIRS4=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  const ALL8=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1},{x:1,y:1},{x:1,y:-1},{x:-1,y:1},{x:-1,y:-1}];
+
+  // Can we place a NEW tile at (gx,gy) connected only from (fromGx,fromGy)?
+  const canPlace=(gx,gy,fromGx,fromGy)=>{
+    if(grid.has(`${gx},${gy}`)) return false;
+    for(const d of ALL8){
+      const nx=gx+d.x, ny=gy+d.y;
+      if(nx===fromGx && ny===fromGy) continue; // the connecting tile is fine
+      if(grid.has(`${nx},${ny}`)) return false;
+    }
+    return true;
   };
 
-  // ── Pure Monopoly snake: tiles touch edge-to-edge, no gaps ──
-  const TW = TS*2+6;   // tile width (includes border)
-  const TH = TS*2+6;   // tile height
-  const PAD = 28;      // outer board margin
+  // ── 1. SERPENTINE SPINE ──────────────────────────────────────────────
+  // Horizontal rows connected by 3-step vertical segments, alternating direction.
+  // Rows at gy = 0, 3, 6, 9, 12, 15, 18  (gap of 3 between rows)
+  const NUM_ROWS=8, ROW_GAP=3;
+  const rowLen=()=> 7+Math.floor(Math.random()*8); // 7-14 tiles per row
 
-  // Fit as many columns/rows as possible
-  const COLS = Math.max(4, Math.floor((W - PAD*2) / TW));
-  const ROWS = Math.max(3, Math.floor((H - PAD*2) / TH));
+  let cx=0, cy=0, rowDir=1;
+  let prevId=mkT(cx,cy);
+  const spineRows=[];  // [ [id,id,...], ... ]
 
-  // Adjust TW/TH slightly so tiles perfectly fill the board
-  const tileW = Math.floor((W - PAD*2) / COLS);
-  const tileH = Math.floor((H - PAD*2) / ROWS);
+  for(let r=0;r<NUM_ROWS;r++){
+    const len=rowLen();
+    const rowIds=[prevId];
 
-  // Build snake positions — bottom row L→R, then snake upward
-  const positions = [];
-  for(let row = ROWS-1; row >= 0; row--){
-    const rowNum = ROWS-1-row;            // 0 = bottom row
-    const startX = PAD + tileW/2;
-    const y = PAD + tileH/2 + row*tileH;
-    if(rowNum % 2 === 0){
-      // left → right
-      for(let col=0; col<COLS; col++)
-        positions.push({x: startX + col*tileW, y});
-    } else {
-      // right → left
-      for(let col=COLS-1; col>=0; col--)
-        positions.push({x: startX + col*tileW, y});
+    for(let i=1;i<len;i++){
+      cx+=rowDir;
+      const nid=mkT(cx,cy);
+      conn(prevId,nid);
+      prevId=nid;
+      rowIds.push(nid);
+    }
+    spineRows.push(rowIds);
+
+    // Vertical connector to next row
+    if(r<NUM_ROWS-1){
+      for(let v=1;v<=ROW_GAP;v++){
+        cy++;
+        const nid=mkT(cx,cy);
+        conn(prevId,nid);
+        prevId=nid;
+      }
+      rowDir*=-1;
     }
   }
 
-  const total = positions.length;
+  // ── 2. PERPENDICULAR BRANCHES (the crossword arms) ───────────────────
+  // For each spine row, grow 2-4 vertical branches off mid-row tiles.
+  for(let r=0;r<spineRows.length;r++){
+    const row=spineRows[r];
+    const branchCnt=2+Math.floor(Math.random()*3);
+    const mid=row.slice(1,-1); // exclude row endpoints
+    const picks=[...mid].sort(()=>Math.random()-.5).slice(0,branchCnt);
 
-  // Assign types
-  for(let i=0; i<total; i++){
-    let type;
-    const prog = i/total;
-    if(i===0) type='start';
-    else if(i===total-1) type='boss';
-    else{
-      type = pickT(prog);
-      // Guaranteed specials at regular intervals
-      if(i % 7 === 3) type='town';
-      if(i % 11 === 5) type='shop';
-      if(i === Math.floor(total*0.40)) type='miniboss';
-      if(i === Math.floor(total*0.72)) type='miniboss';
-      if(i === Math.floor(total*0.55)) type='boss';
+    for(const rootId of picks){
+      const root=tiles[rootId];
+      // Try both up and down; pick whichever is free
+      const dirs=[-1,1].sort(()=>Math.random()-.5);
+      for(const bd of dirs){
+        const bLen=2+Math.floor(Math.random()*4); // 2-5 tiles
+        let bPrev=rootId;
+        let grown=0;
+        for(let i=1;i<=bLen;i++){
+          const bx=root.gx, by=root.gy+bd*i;
+          if(!canPlace(bx,by,tiles[bPrev].gx,tiles[bPrev].gy)) break;
+          const nid=mkT(bx,by);
+          conn(bPrev,nid);
+          bPrev=nid;
+          grown++;
+        }
+        if(grown>0) break; // grew at least one tile in this direction
+      }
     }
-    mkT(positions[i].x, positions[i].y, type);
   }
 
-  // Connect linearly (each tile connects to next)
-  for(let i=0; i<tiles.length-1; i++) conn(i, i+1);
+  // ── 3. BOSS TILES: 3, equally distributed along the path ─────────────
+  // Rank non-boss tiles by their distance index along the board (using gy as primary)
+  const allNormal=tiles.filter(t=>t.type==='normal');
+  // Sort by grid distance from origin (Manhattan) to get early/mid/late zones
+  const sorted=[...allNormal].sort((a,b)=>(Math.abs(a.gx)+Math.abs(a.gy))-(Math.abs(b.gx)+Math.abs(b.gy)));
+  const bossPool=sorted.filter(t=>Math.abs(t.gx)+Math.abs(t.gy)>=4);
+  const seg=Math.floor(bossPool.length/3);
+  const zones=[bossPool.slice(0,seg), bossPool.slice(seg,seg*2), bossPool.slice(seg*2)];
 
-  board.tiles=tiles; board.connections=conns; board.startTile=0;
-  board.forks=[];  // no fork tiles
+  for(let z=0;z<3;z++){
+    const shuffled=[...zones[z]].sort(()=>Math.random()-.5);
+    let placed=false;
+    outer:for(const t of shuffled){
+      for(const d of DIRS4){
+        const bx=t.gx+d.x, by=t.gy+d.y;
+        // Boss tile must be fully isolated except for its one path connection
+        if(!grid.has(`${bx},${by}`)){
+          let clear=true;
+          for(const dd of ALL8){
+            const nx=bx+dd.x, ny=by+dd.y;
+            if(nx===t.gx && ny===t.gy) continue;
+            if(grid.has(`${nx},${ny}`)){clear=false;break;}
+          }
+          if(clear){
+            const bossId=mkT(bx,by,'boss');
+            conn(t.id,bossId);
+            placed=true;
+            break outer;
+          }
+        }
+      }
+    }
+  }
 
-  // Center view on start tile
-  panX = W/2 - tiles[0].x;
-  panY = H/2 - tiles[0].y;
+  // ── 4. DISTRIBUTE SPECIAL TILES ──────────────────────────────────────
+  tiles.forEach(t=>{
+    if(t.type==='normal'){
+      const r=Math.random();
+      if(r<0.05)t.type='town';
+      else if(r<0.10)t.type='shop';
+      else if(r<0.16)t.type='quest';
+      else if(r<0.22)t.type='mainquest';
+      else if(r<0.28)t.type='miniboss';
+    }
+  });
+
+  // ── 5. START TILES: dead ends that aren't boss tiles ─────────────────
+  const terminals=tiles.filter(t=>(conns[t.id]||[]).length===1 && t.type!=='boss');
+  board.startTiles=terminals.length>0?terminals.map(t=>t.id):[tiles[0].id];
+  board.startTiles.forEach(id=>tiles[id].type='start');
+
+  board.tiles=tiles;
+  board.connections=conns;
+  board.forks=[];
+  board.tileW=TW;
+  board.tileH=TH;
+
+  // Center the view on the middle of the board
+  const allX=tiles.map(t=>t.x), allY=tiles.map(t=>t.y);
+  const midX=(Math.min(...allX)+Math.max(...allX))/2;
+  const midY=(Math.min(...allY)+Math.max(...allY))/2;
+  panX=bCv.width/2-midX;
+  panY=bCv.height/2-midY;
+  zoom=Math.min(1.0, Math.min(bCv.width/(Math.max(...allX)-Math.min(...allX)+TW*2),
+                               bCv.height/(Math.max(...allY)-Math.min(...allY)+TH*2)));
 }
 
 // Pan events
@@ -633,6 +734,18 @@ window.addEventListener('mouseup',()=>{isPanning=false;});
 bCv.addEventListener('touchstart',e=>{const t=e.touches[0];isPanning=true;panMoved=false;panStartX=t.clientX;panStartY=t.clientY;},{passive:true});
 bCv.addEventListener('touchmove',e=>{if(!isPanning)return;const t=e.touches[0];const dx=t.clientX-panStartX,dy=t.clientY-panStartY;if(Math.abs(dx)>3||Math.abs(dy)>3)panMoved=true;panX+=dx;panY+=dy;panStartX=t.clientX;panStartY=t.clientY;},{passive:true});
 bCv.addEventListener('touchend',()=>{isPanning=false;});
+
+// Zoom with mouse wheel
+bCv.addEventListener('wheel',e=>{
+  e.preventDefault();
+  const factor=e.deltaY<0?1.12:1/1.12;
+  const newZoom=Math.max(ZOOM_MIN,Math.min(ZOOM_MAX,zoom*factor));
+  const rc=bCv.getBoundingClientRect();
+  const mx=e.clientX-rc.left, my=e.clientY-rc.top;
+  panX=mx+(panX-mx)*(newZoom/zoom);
+  panY=my+(panY-my)*(newZoom/zoom);
+  zoom=newZoom;
+},{passive:false});
 
 let bAnim=0;
 function drawBoard(){
@@ -653,9 +766,32 @@ function drawBoard(){
   bCtx.strokeStyle='#b8902a'; bCtx.lineWidth=2; bCtx.strokeRect(m+6,m+6,bCv.width-m*2-12,bCv.height-m*2-12);
 
   if(!board.tiles.length){requestAnimationFrame(drawBoard);return;}
-  bCtx.save(); bCtx.translate(panX,panY);
+  bCtx.save(); bCtx.translate(panX,panY); bCtx.scale(zoom,zoom);
 
-  // Draw all tiles (they touch — no road drawing needed)
+  // Draw path connections between tiles
+  const drawnEdges=new Set();
+  Object.entries(board.connections).forEach(([fi,tos])=>{
+    const f=board.tiles[parseInt(fi)];
+    tos.forEach(ti=>{
+      const key=Math.min(parseInt(fi),ti)+'-'+Math.max(parseInt(fi),ti);
+      if(drawnEdges.has(key))return;
+      drawnEdges.add(key);
+      const tt=board.tiles[ti];
+      // Outer dark road border
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#3a2208';bCtx.lineWidth=8;bCtx.lineCap='round';bCtx.stroke();
+      // Inner golden road
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#b87c28';bCtx.lineWidth=4;bCtx.stroke();
+      // Dashed centre line
+      bCtx.setLineDash([8,6]);
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='rgba(255,240,160,0.35)';bCtx.lineWidth=1.5;bCtx.stroke();
+      bCtx.setLineDash([]);bCtx.lineCap='butt';
+    });
+  });
+
+  // Draw tiles
   board.tiles.forEach((t,i)=>drawTile(t,i,GS.highlightedTiles?.includes(i)));
 
   // Draw hero sprites on top
@@ -693,15 +829,9 @@ const TILE_LABELS = {
 
 function drawTile(t,idx,hl){
   const {x,y}=t;
-  // Compute tile bounds from genBoard tileW/tileH
-  // Since tiles are center-positioned, half-extents:
   if(!board.tiles.length)return;
-  // Recover tileW/H from adjacent tile spacing or use TS
-  const W=bCv.width,H=bCv.height,COLS=Math.max(4,Math.floor((W-56)/(TS*2+6)));
-  const tileW=Math.floor((W-56)/COLS);
-  const PAD=28;
-  const ROWS=Math.max(3,Math.floor((H-56)/(TS*2+6)));
-  const tileH=Math.floor((H-56)/ROWS);
+  const tileW=board.tileW||80;
+  const tileH=board.tileH||60;
   const hw=tileW/2, hh=tileH/2;
   const tx=x-hw, ty=y-hh;
   const tc=TILE_COLORS[t.type]||TILE_COLORS.normal;
@@ -962,7 +1092,7 @@ bCv.addEventListener('click',e=>{
   if(GS.phase!=='move')return;
   if(panMoved)return;
   const rc=bCv.getBoundingClientRect();
-  const mx=e.clientX-rc.left-panX,my=e.clientY-rc.top-panY;
+  const mx=(e.clientX-rc.left-panX)/zoom,my=(e.clientY-rc.top-panY)/zoom;
   let best=null,bestD=999;
   board.tiles.forEach((t,i)=>{const d=Math.hypot(t.x-mx,t.y-my);if(d<TS*1.7&&d<bestD){bestD=d;best=i;}});
   if(best!==null&&GS.highlightedTiles.includes(best))moveTo(best);
@@ -1002,9 +1132,10 @@ function renderForms(){
   const cols=['#9a3a3a','#3a5a9a','#3a9a5a','#9a8a3a','#7a3a9a'];
   pForms=[];
   for(let i=0;i<playerCount;i++){
-    pForms.push({cls:'warrior',alloc:{str:0,int:0,dex:0,hp:0},pts:2});
-    const card=document.createElement('div');card.className='pcard';card.style.borderColor=cols[i]+'66';
-    card.innerHTML=`<div class="plbl" style="color:${cols[i]}">Player ${i+1}</div>
+    const pColor = cols[i];
+    pForms.push({cls:'warrior',alloc:{str:0,int:0,dex:0,hp:0},pts:2, color: pColor});
+    const card=document.createElement('div');card.className='pcard';card.style.borderColor=pColor+'66';
+    card.innerHTML=`<div class="plbl" style="color:${pColor}">Player ${i+1}</div>
       <div class="sprite-wrap" id="sprWrap${i}"></div>
       <input class="pname-in" id="pn${i}" type="text" placeholder="Name..." value="Hero ${i+1}" maxlength="12">
       <div id="clsRow${i}">${Object.entries(CLASSES).map(([k,v])=>`<button class="cls-btn${k==='warrior'?' sel':''}" id="clb${i}_${k}" onclick="selCls(${i},'${k}')">${v.icon} ${v.name}</button>`).join('')}</div>
@@ -1014,13 +1145,14 @@ function renderForms(){
         <div class="pts-left" id="pts${i}">✦ 2 points</div>
       </div>`;
     row.appendChild(card);
-    card.querySelector(`#sprWrap${i}`).appendChild(renderSprite('warrior',40));
+    card.querySelector(`#sprWrap${i}`).appendChild(renderSprite('warrior', 40, pColor));
   }
 }
 function selCls(pi,cls){
   pForms[pi].cls=cls;
+  const pColor = pForms[pi].color;
   ['mage','warrior','ranger','monk'].forEach(c=>{const b=document.getElementById(`clb${pi}_${c}`);if(b)b.className='cls-btn'+(c===cls?' sel':'');});
-  const wrap=document.getElementById(`sprWrap${pi}`);wrap.innerHTML='';wrap.appendChild(renderSprite(cls,40));
+  const wrap=document.getElementById(`sprWrap${pi}`);wrap.innerHTML='';wrap.appendChild(renderSprite(cls, 40, pColor));
 }
 function adj(pi,s,d){
   const pf=pForms[pi];const cur=pf.alloc[s]||0;
@@ -1039,10 +1171,22 @@ function startGame(){
     const pf=pForms[i];
     const nm=document.getElementById(`pn${i}`).value.trim()||`Hero ${i+1}`;
     const cls=pf.cls||'warrior';const base=CLASSES[cls];
-    GS.players.push({name:nm,class:cls,color:CLASSES[cls].color,allocStr:pf.alloc.str||0,allocInt:pf.alloc.int||0,allocDex:pf.alloc.dex||0,maxHp:base.hp+(pf.alloc.hp||0)*10,hp:base.hp+(pf.alloc.hp||0)*10,maxMp:base.mp,mp:base.mp,gold:80,inventory:[],equipped:{weapon:null,head:null,body:null,feet:null,accessory:null},bossesDefeated:0,tileIdx:0,skipTurns:0,moveBonus:0,rollBonus:0,visitHistory:[],poison:0});
+    const pColor = pf.color || base.color;
+    GS.players.push({name:nm,class:cls,color:pColor,allocStr:pf.alloc.str||0,allocInt:pf.alloc.int||0,allocDex:pf.alloc.dex||0,maxHp:base.hp+(pf.alloc.hp||0)*10,hp:base.hp+(pf.alloc.hp||0)*10,maxMp:base.mp,mp:base.mp,gold:80,inventory:[],equipped:{weapon:null,head:null,body:null,feet:null,accessory:null},bossesDefeated:0,tileIdx:0,skipTurns:0,moveBonus:0,rollBonus:0,visitHistory:[],poison:0});
   }
   showS('gameScreen');
-  setTimeout(()=>{genBoard();GS.players.forEach(p=>{p.tileIdx=board.startTile;});GS.phase='initiative';drawBoard();rollInit();},120);
+  setTimeout(()=>{
+    genBoard();
+    // Assign players to random distinct ends of the board
+    const shuffledStarts = [...board.startTiles].sort(() => Math.random() - 0.5);
+    GS.players.forEach((p, i)=>{
+      p.tileIdx = shuffledStarts[i % shuffledStarts.length];
+    });
+    GS.phase='initiative';
+    drawBoard();
+    rollInit();
+    // Center view on the board midpoint (already set by genBoard with zoom)
+  },120);
 }
 
 function cp(){return GS.players[GS.curP];}
@@ -1140,7 +1284,14 @@ function doNormal(){
   const ev=wRand(NORMAL_EV),p=cp();
   if(ev.t==='nothing'){openModal('🌿 Uneventful','Nothing eventful happens along the road.',[{label:'Continue',fn:closeEndTurn}]);}
   else if(ev.t==='rob'){const lost=Math.max(5,Math.floor(p.gold*.2));p.gold=Math.max(0,p.gold-lost);openModal('🗡️ Ambush!',`Bandits steal ${lost} gold!`,[{label:'Curse them!',fn:closeEndTurn}]);toast(`${p.name} lost ${lost} gold!`,'bad');}
-  else if(ev.t==='tunnel'){p.tileIdx=Math.min(p.tileIdx+10,board.tiles.length-1);openModal('🕳️ Secret Tunnel!','A hidden tunnel — leap forward 10 tiles!',[{label:'Excellent!',fn:closeEndTurn}]);toast(`${p.name} advanced 10 tiles!`,'good');}
+  else if(ev.t==='tunnel'){
+    // Find a tile at least 8 steps away in the graph if possible
+    const reach=getReach(p.tileIdx,10);
+    const target=reach.length?reach[Math.floor(Math.random()*reach.length)]:p.tileIdx;
+    p.tileIdx=target;
+    openModal('🕳️ Secret Tunnel!','A hidden tunnel — you emerge elsewhere!',[{label:'Excellent!',fn:closeEndTurn}]);
+    toast(`${p.name} traveled through a tunnel!`,'good');
+  }
   else if(ev.t==='gold'){const g=20+Math.floor(Math.random()*30);p.gold+=g;openModal('💰 Found Gold!',`You find ${g} gold coins!`,[{label:'Lucky!',fn:closeEndTurn}]);toast(`${p.name} found ${g} gold!`,'good');}
   updPlayers();
 }
