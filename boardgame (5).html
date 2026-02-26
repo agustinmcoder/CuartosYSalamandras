@@ -552,72 +552,75 @@ function genBoard(){
     if(!conns[a].includes(b))conns[a].push(b);
     if(!conns[b].includes(a))conns[b].push(a);
   };
-  const rnd=arr=>arr[Math.floor(Math.random()*arr.length)];
-  const pickT=prog=>{
-    if(prog<0.35)return rnd(['normal','normal','normal','town','shop','quest']);
-    if(prog<0.70)return rnd(['normal','normal','town','quest','mainquest','miniboss']);
-    return rnd(['normal','quest','mainquest','miniboss','boss']);
-  };
 
-  // ── Pure Monopoly snake: tiles touch edge-to-edge, no gaps ──
-  const TW = TS*2+6;   // tile width (includes border)
-  const TH = TS*2+6;   // tile height
-  const PAD = 28;      // outer board margin
+  // Three vertical paths: left (Forest Road), center (Main Road), right (Cursed Road)
+  // Spread controls how far left/right paths are from center
+  const spread=Math.min(W*0.26,290);
+  const lx=W/2-spread, cx=W/2, rx=W/2+spread;
 
-  // Fit as many columns/rows as possible
-  const COLS = Math.max(4, Math.floor((W - PAD*2) / TW));
-  const ROWS = Math.max(3, Math.floor((H - PAD*2) / TH));
+  // 8 rows: row 0 = start (bottom), row 7 = final boss (top)
+  const NROWS=8;
+  const padV=52;
+  const rowH=(H-padV*2)/(NROWS-1);
+  const ry=r=>H-padV-r*rowH;
 
-  // Adjust TW/TH slightly so tiles perfectly fill the board
-  const tileW = Math.floor((W - PAD*2) / COLS);
-  const tileH = Math.floor((H - PAD*2) / ROWS);
+  // Store tile display size in board object (used by drawTile)
+  board.tileW=Math.min(Math.floor(spread*0.54),88);
+  board.tileH=Math.min(Math.floor(rowH*0.72),56);
 
-  // Build snake positions — bottom row L→R, then snake upward
-  const positions = [];
-  for(let row = ROWS-1; row >= 0; row--){
-    const rowNum = ROWS-1-row;            // 0 = bottom row
-    const startX = PAD + tileW/2;
-    const y = PAD + tileH/2 + row*tileH;
-    if(rowNum % 2 === 0){
-      // left → right
-      for(let col=0; col<COLS; col++)
-        positions.push({x: startX + col*tileW, y});
-    } else {
-      // right → left
-      for(let col=COLS-1; col>=0; col--)
-        positions.push({x: startX + col*tileW, y});
-    }
-  }
+  const ids={};
+  const p=(name,x,row,type)=>{ids[name]=mkT(x,ry(row),type);};
+  const lk=(a,b)=>conn(ids[a],ids[b]);
 
-  const total = positions.length;
+  // Row 0: Start
+  p('S',cx,0,'start');
 
-  // Assign types
-  for(let i=0; i<total; i++){
-    let type;
-    const prog = i/total;
-    if(i===0) type='start';
-    else if(i===total-1) type='boss';
-    else{
-      type = pickT(prog);
-      // Guaranteed specials at regular intervals
-      if(i % 7 === 3) type='town';
-      if(i % 11 === 5) type='shop';
-      if(i === Math.floor(total*0.40)) type='miniboss';
-      if(i === Math.floor(total*0.72)) type='miniboss';
-      if(i === Math.floor(total*0.55)) type='boss';
-    }
-    mkT(positions[i].x, positions[i].y, type);
-  }
+  // Row 1: Three-way split — players choose their first path
+  p('L1',lx,1,'town');       // Forest: safe start
+  p('C1',cx,1,'normal');     // Main: balanced start
+  p('R1',rx,1,'quest');      // Cursed: risky start
+  lk('S','L1'); lk('S','C1'); lk('S','R1');
 
-  // Connect linearly (each tile connects to next)
-  for(let i=0; i<tiles.length-1; i++) conn(i, i+1);
+  // Row 2 + first bridge (L↔C↔R)
+  p('L2',lx,2,'shop');
+  p('C2',cx,2,'mainquest');
+  p('R2',rx,2,'miniboss');
+  lk('L1','L2'); lk('C1','C2'); lk('R1','R2');
+  lk('L2','C2'); lk('C2','R2'); // horizontal bridge
 
-  board.tiles=tiles; board.connections=conns; board.startTile=0;
-  board.forks=[];  // no fork tiles
+  // Row 3
+  p('L3',lx,3,'quest');
+  p('C3',cx,3,'town');
+  p('R3',rx,3,'mainquest');
+  lk('L2','L3'); lk('C2','C3'); lk('R2','R3');
 
-  // Center view on start tile
-  panX = W/2 - tiles[0].x;
-  panY = H/2 - tiles[0].y;
+  // Row 4 + second bridge
+  p('L4',lx,4,'town');
+  p('C4',cx,4,'miniboss');
+  p('R4',rx,4,'boss');
+  lk('L3','L4'); lk('C3','C4'); lk('R3','R4');
+  lk('L4','C4'); lk('C4','R4'); // horizontal bridge
+
+  // Row 5
+  p('L5',lx,5,'shop');
+  p('C5',cx,5,'quest');
+  p('R5',rx,5,'quest');
+  lk('L4','L5'); lk('C4','C5'); lk('R4','R5');
+
+  // Row 6 + third bridge
+  p('L6',lx,6,'miniboss');
+  p('C6',cx,6,'mainquest');
+  p('R6',rx,6,'miniboss');
+  lk('L5','L6'); lk('C5','C6'); lk('R5','R6');
+  lk('L6','C6'); lk('C6','R6'); // horizontal bridge
+
+  // Row 7: Final boss — all paths converge here
+  p('BOSS',cx,7,'boss');
+  lk('L6','BOSS'); lk('C6','BOSS'); lk('R6','BOSS');
+
+  board.tiles=tiles; board.connections=conns; board.startTile=ids['S'];
+  board.forks=[];
+  panX=0; panY=0;
 }
 
 // Pan events
@@ -655,8 +658,43 @@ function drawBoard(){
   if(!board.tiles.length){requestAnimationFrame(drawBoard);return;}
   bCtx.save(); bCtx.translate(panX,panY);
 
-  // Draw all tiles (they touch — no road drawing needed)
+  // Draw path connections between tiles
+  const drawnEdges=new Set();
+  Object.entries(board.connections).forEach(([fi,tos])=>{
+    const f=board.tiles[parseInt(fi)];
+    tos.forEach(ti=>{
+      const key=Math.min(parseInt(fi),ti)+'-'+Math.max(parseInt(fi),ti);
+      if(drawnEdges.has(key))return;
+      drawnEdges.add(key);
+      const tt=board.tiles[ti];
+      // Outer dark road border
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#3a2208';bCtx.lineWidth=8;bCtx.lineCap='round';bCtx.stroke();
+      // Inner golden road
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#b87c28';bCtx.lineWidth=4;bCtx.stroke();
+      // Dashed centre line
+      bCtx.setLineDash([8,6]);
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='rgba(255,240,160,0.35)';bCtx.lineWidth=1.5;bCtx.stroke();
+      bCtx.setLineDash([]);bCtx.lineCap='butt';
+    });
+  });
+
+  // Draw tiles
   board.tiles.forEach((t,i)=>drawTile(t,i,GS.highlightedTiles?.includes(i)));
+
+  // Path name labels above each column (indices: L6=16, C6=17, R6=18)
+  if(board.tiles.length>18){
+    const th=board.tileH||56;
+    [['🌿 Forest Road',16],['⚔️ Main Road',17],['💀 Cursed Road',18]].forEach(([label,ti])=>{
+      const t=board.tiles[ti];
+      bCtx.font='bold 10px Cinzel,Arial,sans-serif';
+      bCtx.textAlign='center';
+      bCtx.fillStyle='rgba(240,192,80,0.85)';
+      bCtx.fillText(label,t.x,t.y-th/2-8);
+    });
+  }
 
   // Draw hero sprites on top
   GS.players.forEach((p,pi)=>{
@@ -697,11 +735,8 @@ function drawTile(t,idx,hl){
   // Since tiles are center-positioned, half-extents:
   if(!board.tiles.length)return;
   // Recover tileW/H from adjacent tile spacing or use TS
-  const W=bCv.width,H=bCv.height,COLS=Math.max(4,Math.floor((W-56)/(TS*2+6)));
-  const tileW=Math.floor((W-56)/COLS);
-  const PAD=28;
-  const ROWS=Math.max(3,Math.floor((H-56)/(TS*2+6)));
-  const tileH=Math.floor((H-56)/ROWS);
+  const tileW=board.tileW||Math.floor((bCv.width-56)/Math.max(4,Math.floor((bCv.width-56)/(TS*2+6))));
+  const tileH=board.tileH||Math.floor((bCv.height-56)/Math.max(3,Math.floor((bCv.height-56)/(TS*2+6))));
   const hw=tileW/2, hh=tileH/2;
   const tx=x-hw, ty=y-hh;
   const tc=TILE_COLORS[t.type]||TILE_COLORS.normal;
