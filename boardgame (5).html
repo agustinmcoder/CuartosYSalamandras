@@ -554,129 +554,151 @@ function resizeBoard(){
 
 function genBoard(){
   resizeBoard();
-  let tiles=[], conns={};
-  const grid=new Map();
-  const TW=80, TH=60;
 
-  const mkT=(gx,gy,type='normal')=>{
-    const key=`${gx},${gy}`;
-    if(grid.has(key)) return grid.get(key);
-    const id=tiles.length;
-    tiles.push({gx,gy,x:gx*TW,y:gy*TH,type,id});
-    grid.set(key,id);
-    return id;
+  // ── TRUE CROSSWORD GENERATOR ─────────────────────────────────────────
+  // Words (runs of tiles) are placed H or V so they only share cells at
+  // perpendicular intersections — no two parallel words may touch.
+  const COLS=30, ROWS=24, TW=64, TH=64;
+
+  // grid[y][x] = true when a tile occupies that cell
+  const grid=Array.from({length:ROWS},()=>new Array(COLS).fill(false));
+  const words=[];   // {wx,wy,len,horiz}
+  let tileCount=0;
+
+  const inB=(x,y)=>x>=0&&x<COLS&&y>=0&&y<ROWS;
+
+  // Can a word of length `len` starting at (wx,wy) be placed?
+  // Strict crossword rules:
+  //   • empty cells: no parallel immediate neighbours
+  //   • occupied cells: only valid if the existing tile has NO same-direction
+  //     neighbours (i.e. it belongs to a perpendicular word only)
+  //   • word ends must not abut an existing tile
+  //   • at least one intersection required (after the first word)
+  const canPlace=(wx,wy,len,horiz)=>{
+    const ex=horiz?wx+len-1:wx, ey=horiz?wy:wy+len-1;
+    if(!inB(wx,wy)||!inB(ex,ey)) return false;
+    let hasX=false;
+    for(let i=0;i<len;i++){
+      const cx=horiz?wx+i:wx, cy=horiz?wy:wy+i;
+      if(grid[cy][cx]){
+        // Intersection: existing tile must be on a perpendicular word only
+        if(horiz){
+          // For a horiz word the crossing tile must NOT have horiz neighbours
+          if((cx>0&&grid[cy][cx-1])||(cx+1<COLS&&grid[cy][cx+1])) return false;
+        } else {
+          // For a vert word the crossing tile must NOT have vert neighbours
+          if((cy>0&&grid[cy-1][cx])||(cy+1<ROWS&&grid[cy+1][cx])) return false;
+        }
+        hasX=true;
+      } else {
+        // Empty cell: no parallel immediate neighbours
+        if(horiz){
+          if((cy>0&&grid[cy-1][cx])||(cy+1<ROWS&&grid[cy+1][cx])) return false;
+        } else {
+          if((cx>0&&grid[cy][cx-1])||(cx+1<COLS&&grid[cy][cx+1])) return false;
+        }
+      }
+    }
+    // Word ends must not abut existing tiles
+    if(horiz){
+      if(wx>0&&grid[wy][wx-1]) return false;
+      if(wx+len<COLS&&grid[wy][wx+len]) return false;
+    } else {
+      if(wy>0&&grid[wy-1][wx]) return false;
+      if(wy+len<ROWS&&grid[wy+len][wx]) return false;
+    }
+    return words.length===0||hasX;
   };
 
+  const placeWord=(wx,wy,len,horiz)=>{
+    for(let i=0;i<len;i++){
+      const cx=horiz?wx+i:wx, cy=horiz?wy:wy+i;
+      if(!grid[cy][cx]){grid[cy][cx]=true; tileCount++;}
+    }
+    words.push({wx,wy,len,horiz});
+  };
+
+  // Seed: first horizontal word in the centre
+  const fl=9, fx=Math.floor((COLS-fl)/2), fy=Math.floor(ROWS/2);
+  placeWord(fx,fy,fl,true);
+
+  // Grow crossword until we reach 250 tiles
+  let att=0;
+  while(tileCount<250&&att<120000){
+    att++;
+    const src=words[Math.floor(Math.random()*words.length)];
+    const nh=!src.horiz;
+    const ii=Math.floor(Math.random()*src.len);
+    const ix=src.horiz?src.wx+ii:src.wx;
+    const iy=src.horiz?src.wy:src.wy+ii;
+    const nlen=3+Math.floor(Math.random()*9); // 3-11 tiles
+    const off=Math.floor(Math.random()*nlen);
+    const nx=nh?ix-off:ix;
+    const ny=nh?iy:iy-off;
+    if(canPlace(nx,ny,nlen,nh)) placeWord(nx,ny,nlen,nh);
+  }
+
+  // ── CONVERT GRID → TILES + CONNECTIONS ──────────────────────────────
+  let tiles=[], conns={};
+  const idGrid=Array.from({length:ROWS},()=>new Array(COLS).fill(-1));
+
+  for(let y=0;y<ROWS;y++)
+    for(let x=0;x<COLS;x++)
+      if(grid[y][x]){
+        const id=tiles.length;
+        tiles.push({gx:x,gy:y,x:x*TW,y:y*TH,type:'normal',id});
+        idGrid[y][x]=id;
+      }
+
   const conn=(a,b)=>{
-    if(a===undefined||b===undefined||a===b)return;
     if(!conns[a])conns[a]=[];if(!conns[b])conns[b]=[];
     if(!conns[a].includes(b))conns[a].push(b);
     if(!conns[b].includes(a))conns[b].push(a);
   };
 
+  for(let y=0;y<ROWS;y++)
+    for(let x=0;x<COLS;x++)
+      if(idGrid[y][x]>=0){
+        if(x+1<COLS&&idGrid[y][x+1]>=0) conn(idGrid[y][x],idGrid[y][x+1]);
+        if(y+1<ROWS&&idGrid[y+1]&&idGrid[y+1][x]>=0) conn(idGrid[y][x],idGrid[y+1][x]);
+      }
+
+  // ── BOSS TILES: 3, one per third, placed OFF the crossword ───────────
+  // Build a Set of occupied (x,y) strings for fast adjacency checks
+  const occ=new Set();
+  for(let y=0;y<ROWS;y++) for(let x=0;x<COLS;x++) if(grid[y][x]) occ.add(`${x},${y}`);
+
   const DIRS4=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
   const ALL8=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1},{x:1,y:1},{x:1,y:-1},{x:-1,y:1},{x:-1,y:-1}];
 
-  // A tile at (gx,gy) may only be adjacent to its single parent (fromGx,fromGy)
-  const canPlace=(gx,gy,fromGx,fromGy)=>{
-    if(grid.has(`${gx},${gy}`)) return false;
-    for(const d of ALL8){
-      const nx=gx+d.x, ny=gy+d.y;
-      if(nx===fromGx&&ny===fromGy) continue;
-      if(grid.has(`${nx},${ny}`)) return false;
-    }
-    return true;
-  };
-
-  // ── 1. SERPENTINE SPINE (10 rows, gap of 3) ──────────────────────────
-  const NUM_ROWS=10, ROW_GAP=3;
-  const rowLen=()=>8+Math.floor(Math.random()*8);
-
-  let cx=0,cy=0,rowDir=1,prevId=mkT(cx,cy);
-  const spineRows=[];
-
-  for(let r=0;r<NUM_ROWS;r++){
-    const len=rowLen();
-    const rowIds=[prevId];
-    for(let i=1;i<len;i++){
-      cx+=rowDir;
-      const nid=mkT(cx,cy); conn(prevId,nid); prevId=nid; rowIds.push(nid);
-    }
-    spineRows.push(rowIds);
-    if(r<NUM_ROWS-1){
-      for(let v=1;v<=ROW_GAP;v++){
-        cy++; const nid=mkT(cx,cy); conn(prevId,nid); prevId=nid;
-      }
-      rowDir*=-1;
-    }
-  }
-
-  // ── 2. FIRST CROSSWORD PASS: vertical arms off every spine row ───────
-  for(const row of spineRows){
-    const cnt=3+Math.floor(Math.random()*2);
-    const picks=[...row.slice(1,-1)].sort(()=>Math.random()-.5).slice(0,cnt);
-    for(const rootId of picks){
-      const root=tiles[rootId];
-      for(const bd of [-1,1].sort(()=>Math.random()-.5)){
-        const bLen=2+Math.floor(Math.random()*4);
-        let bPrev=rootId,grown=0;
-        for(let i=1;i<=bLen;i++){
-          const bx=root.gx,by=root.gy+bd*i;
-          if(!canPlace(bx,by,tiles[bPrev].gx,tiles[bPrev].gy)) break;
-          const nid=mkT(bx,by); conn(bPrev,nid); bPrev=nid; grown++;
-        }
-        if(grown>0) break;
-      }
-    }
-  }
-
-  // ── 3. GROW TO 250 TILES (second crossword pass) ──────────────────────
-  // Each attempt picks a random existing tile and grows perpendicular to its
-  // dominant axis — guaranteeing the crossword pattern throughout.
-  let att=0;
-  while(tiles.length<250&&att<10000){
-    att++;
-    const rootId=Math.floor(Math.random()*tiles.length);
-    const root=tiles[rootId];
-    const rc=conns[rootId]||[];
-    let hN=0,vN=0;
-    rc.forEach(cid=>{tiles[cid].gy===root.gy?hN++:vN++;});
-    const goVert=hN>=vN; // grow perpendicular to existing neighbours
-    const bDir=Math.random()<0.5?1:-1;
-    const bLen=2+Math.floor(Math.random()*5);
-    let bPrev=rootId;
-    for(let i=1;i<=bLen;i++){
-      const bx=goVert?root.gx:root.gx+bDir*i;
-      const by=goVert?root.gy+bDir*i:root.gy;
-      if(!canPlace(bx,by,tiles[bPrev].gx,tiles[bPrev].gy)) break;
-      const nid=mkT(bx,by); conn(bPrev,nid); bPrev=nid;
-    }
-  }
-
-  // ── 4. BOSS TILES: 3, one in each third of the board ─────────────────
-  const allN=tiles.filter(t=>t.type==='normal');
-  const byD=[...allN].sort((a,b)=>(Math.abs(a.gx)+Math.abs(a.gy))-(Math.abs(b.gx)+Math.abs(b.gy)));
-  const bP=byD.filter(t=>Math.abs(t.gx)+Math.abs(t.gy)>=5);
-  const s3=Math.floor(bP.length/3);
-  [[0,s3],[s3,s3*2],[s3*2,bP.length]].forEach(([lo,hi])=>{
-    const zone=[...bP.slice(lo,hi)].sort(()=>Math.random()-.5);
+  // Divide tiles into early / mid / late thirds by Manhattan distance from start
+  const byDist=[...tiles].sort((a,b)=>(a.gx+a.gy)-(b.gx+b.gy));
+  const seg=Math.floor(byDist.length/3);
+  [[0,seg],[seg,seg*2],[seg*2,byDist.length]].forEach(([lo,hi])=>{
+    const zone=[...byDist.slice(lo,hi)].filter(t=>t.type==='normal').sort(()=>Math.random()-.5);
     outer:for(const t of zone){
       for(const d of DIRS4){
-        const bx=t.gx+d.x,by=t.gy+d.y;
-        if(!grid.has(`${bx},${by}`)){
-          let clr=true;
-          for(const dd of ALL8){
-            const nx=bx+dd.x,ny=by+dd.y;
-            if(nx===t.gx&&ny===t.gy) continue;
-            if(grid.has(`${nx},${ny}`)){clr=false;break;}
-          }
-          if(clr){const bid=mkT(bx,by,'boss');conn(t.id,bid);break outer;}
+        const bx=t.gx+d.x, by=t.gy+d.y;
+        if(bx<-1||by<-1||bx>COLS||by>ROWS) continue;
+        if(occ.has(`${bx},${by}`)) continue;
+        let clr=true;
+        for(const dd of ALL8){
+          const nx=bx+dd.x, ny=by+dd.y;
+          if(nx===t.gx&&ny===t.gy) continue;
+          if(occ.has(`${nx},${ny}`)){clr=false;break;}
+        }
+        if(clr){
+          const bid=tiles.length;
+          tiles.push({gx:bx,gy:by,x:bx*TW,y:by*TH,type:'boss',id:bid});
+          occ.add(`${bx},${by}`);
+          conn(t.id,bid);
+          break outer;
         }
       }
     }
   });
 
-  // ── 5. DISTRIBUTE SPECIAL TILES ──────────────────────────────────────
+  // ── DISTRIBUTE SPECIAL TILES ─────────────────────────────────────────
   tiles.forEach(t=>{
     if(t.type==='normal'){
       const r=Math.random();
@@ -688,7 +710,7 @@ function genBoard(){
     }
   });
 
-  // ── 6. START TILES ────────────────────────────────────────────────────
+  // ── START TILES: word-end dead-ends (1 connection), not boss ─────────
   const terminals=tiles.filter(t=>(conns[t.id]||[]).length===1&&t.type!=='boss');
   board.startTiles=terminals.length>0?terminals.map(t=>t.id):[tiles[0].id];
   board.startTiles.forEach(id=>tiles[id].type='start');
@@ -696,8 +718,8 @@ function genBoard(){
   board.tiles=tiles; board.connections=conns; board.forks=[];
   board.tileW=TW; board.tileH=TH;
 
-  // Auto-fit entire board into view
-  const allX=tiles.map(t=>t.x),allY=tiles.map(t=>t.y);
+  // Auto-fit into view
+  const allX=tiles.map(t=>t.x), allY=tiles.map(t=>t.y);
   const bw=Math.max(...allX)-Math.min(...allX)+TW*2;
   const bh=Math.max(...allY)-Math.min(...allY)+TH*2;
   zoom=Math.min(1.0,Math.min(bCv.width/bw,bCv.height/bh));
@@ -1181,82 +1203,109 @@ function cp(){return GS.players[GS.curP];}
 //  INITIATIVE
 // ══════════════════════════════════════════════════════
 function rollInit(){
-  // Pre-calculate every player's roll (hidden until animation reveals it)
+  // Pre-calculate rolls — hidden until each player taps their die
   const rolls=GS.players.map((p,i)=>{
     const r=Math.floor(Math.random()*20)+1;
     const dex=calcStats(p).dex;
-    return{p,i,r,dex,score:r+dex};
+    return{p,i,r,dex,score:r+dex,revealed:false};
   });
 
-  // Build modal: one d20 die per player
   const dieBoxes=rolls.map((rv,i)=>`
-    <div style="text-align:center;min-width:72px">
-      <div style="font-size:11px;color:${rv.p.color||'var(--gold)'};margin-bottom:5px;font-family:'Cinzel',serif;white-space:nowrap">
+    <div style="text-align:center;min-width:80px">
+      <div style="font-size:11px;color:${rv.p.color||'var(--gold)'};margin-bottom:6px;
+                  font-family:'Cinzel',serif;white-space:nowrap">
         ${CLASSES[rv.p.class].icon} ${rv.p.name}
       </div>
-      <div id="initDie${i}" class="dice" style="width:54px;height:54px;font-size:20px;margin:0 auto;border-radius:4px">?</div>
-      <div id="initBonus${i}" style="font-size:8px;color:var(--dim);margin-top:3px;min-height:13px"></div>
+      <div id="initDie${i}" class="dice"
+           style="width:58px;height:58px;font-size:13px;margin:0 auto;border-radius:6px;
+                  cursor:pointer;display:flex;align-items:center;justify-content:center;
+                  transition:transform .1s,box-shadow .1s;letter-spacing:0"
+           onclick="window._rollOneDie(${i})"
+           onmousedown="this.style.transform='scale(.92)'"
+           onmouseup="this.style.transform='scale(1)'"
+           title="Click to roll!">
+        <span style="opacity:.55;font-size:11px;line-height:1.2;text-align:center">CLICK<br>TO ROLL</span>
+      </div>
+      <div id="initBonus${i}" style="font-size:8px;color:var(--dim);margin-top:4px;min-height:14px"></div>
     </div>`).join('');
 
   const html=`
     <div class="mo-title">⚔ Initiative Roll</div>
-    <div class="mo-text" style="font-size:10px;margin-bottom:14px">D20 + DEX — highest score acts first</div>
-    <div style="display:flex;gap:18px;justify-content:center;flex-wrap:wrap;margin-bottom:18px">${dieBoxes}</div>
-    <div id="initOrderBox" style="min-height:56px"></div>`;
+    <div class="mo-text" style="font-size:10px;margin-bottom:16px">
+      Each player taps their die &nbsp;•&nbsp; D20 + DEX
+    </div>
+    <div style="display:flex;gap:20px;justify-content:center;flex-wrap:wrap;margin-bottom:16px">
+      ${dieBoxes}
+    </div>
+    <div id="initOrderBox"></div>`;
 
   openModal(null,null,[],html);
 
-  // Animate dice one by one, then reveal order
-  let idx=0;
-  function rollNext(){
-    if(idx>=rolls.length){showOrder();return;}
-    const i=idx++;
+  // Exposed globally so the inline onclick can reach it
+  window._rollOneDie=(i)=>{
+    const rv=rolls[i];
+    if(rv.revealed) return;
+    rv.revealed=true;
+
     const die=document.getElementById(`initDie${i}`);
     const bonus=document.getElementById(`initBonus${i}`);
-    if(!die){rollNext();return;}
+    if(!die) return;
+
+    // Disable further clicks
+    die.onclick=null;
+    die.style.cursor='default';
     die.classList.add('rolling');
+
     let ticks=0;
     const iv=setInterval(()=>{
       die.textContent=Math.floor(Math.random()*20)+1;
       if(++ticks>14){
         clearInterval(iv);
         die.classList.remove('rolling');
-        die.textContent=rolls[i].r;
-        // Colour: gold for high rolls, red for low
-        die.style.color=rolls[i].r>=15?'#f0c060':rolls[i].r<=4?'#e05050':'var(--text)';
-        die.style.borderColor=rolls[i].r>=15?'var(--gold)':rolls[i].r<=4?'var(--red)':'var(--gold-dark)';
-        if(bonus) bonus.textContent=`+${rolls[i].dex} DEX = ${rolls[i].score}`;
-        setTimeout(rollNext,320);
+        die.textContent=rv.r;
+        die.style.fontSize='22px';
+        // Colour feedback
+        if(rv.r>=15){die.style.color='#f0c060';die.style.borderColor='var(--gold)';}
+        else if(rv.r<=4){die.style.color='#e05050';die.style.borderColor='var(--red)';}
+        if(bonus) bonus.textContent=`${rv.r} + ${rv.dex} DEX = ${rv.score}`;
+
+        // Once everyone has rolled, reveal the turn order
+        if(rolls.every(r=>r.revealed)) _showInitOrder(rolls);
       }
     },70);
-  }
-  setTimeout(rollNext,220);
+  };
 
-  function showOrder(){
+  function _showInitOrder(rolls){
     const sorted=[...rolls].sort((a,b)=>b.score-a.score);
     GS.initOrder=sorted.map(r=>r.i);
     GS.curP=GS.initOrder[0];
+
     const box=document.getElementById('initOrderBox');
     if(box){
       box.innerHTML=`
-        <div style="font-size:8px;letter-spacing:2px;color:var(--dim);text-align:center;margin-bottom:6px">TURN ORDER</div>
+        <div style="font-size:8px;letter-spacing:2px;color:var(--dim);
+                    text-align:center;margin-bottom:6px">TURN ORDER</div>
         <ul class="init-list">
-          ${sorted.map((r,i)=>`<li style="animation-delay:${i*.1}s">
-            <span>${i+1}. ${CLASSES[r.p.class].icon} ${r.p.name}</span>
-            <span class="i-score" style="color:${i===0?'var(--gold)':'var(--text)'}">${r.r}+${r.dex}=${r.score}</span>
-          </li>`).join('')}
+          ${sorted.map((r,k)=>`
+            <li style="animation-delay:${k*.1}s">
+              <span>${k+1}. ${CLASSES[r.p.class].icon} ${r.p.name}</span>
+              <span class="i-score" style="color:${k===0?'var(--gold)':'var(--text)'}">
+                ${r.r}+${r.dex}=${r.score}
+              </span>
+            </li>`).join('')}
         </ul>`;
     }
-    // Append Begin button
+
+    // Add Begin button
     const mbx=document.getElementById('modalBox');
     if(mbx){
       const d=document.createElement('div');
-      d.className='mo-choices';d.style.marginTop='12px';
+      d.className='mo-choices'; d.style.marginTop='12px';
       const b=document.createElement('button');
       b.className='act-btn pri';
       b.textContent=`▶ Begin — ${CLASSES[GS.players[GS.curP].class].icon} ${GS.players[GS.curP].name} goes first`;
       b.onclick=()=>{closeModal();startTurn();};
-      d.appendChild(b);mbx.appendChild(d);
+      d.appendChild(b); mbx.appendChild(d);
     }
   }
 }
