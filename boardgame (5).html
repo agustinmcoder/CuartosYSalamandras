@@ -518,13 +518,21 @@ function drawTree(t,alpha){
 // ══════════════════════════════════════════════════════
 //  SPRITE RENDERER
 // ══════════════════════════════════════════════════════
-function renderSprite(cls,size=40){
-  const color=CLASSES[cls]?.color||'#888888';
-  const px=Math.max(2,Math.floor(size/14));
-  const cv=getPixelSprite(cls,color,px);
-  if(cv)return cv;
+function renderSprite(cls, size = 40, colorOverride = null) {
+  const color = colorOverride || CLASSES[cls]?.color || '#888888';
+  const px = Math.max(2, Math.floor(size / 14));
+  const cv = getPixelSprite(cls, color, px);
+  if (cv) {
+    // Return a NEW canvas copying the cached one to allow multiple instances in DOM
+    const copy = document.createElement('canvas');
+    copy.width = cv.width;
+    copy.height = cv.height;
+    copy.style.imageRendering = 'pixelated';
+    copy.getContext('2d').drawImage(cv, 0, 0);
+    return copy;
+  }
   // fallback blank canvas
-  const fb=document.createElement('canvas');fb.width=size;fb.height=size;return fb;
+  const fb = document.createElement('canvas'); fb.width = size; fb.height = size; return fb;
 }
 
 // ══════════════════════════════════════════════════════
@@ -546,78 +554,163 @@ function genBoard(){
   resizeBoard();
   const W=bCv.width, H=bCv.height;
   let tiles=[], conns={};
-  const mkT=(x,y,type)=>{tiles.push({x,y,type,id:tiles.length});return tiles.length-1;};
+  const grid=new Map();
+
+  const mkT=(gx,gy,type)=>{
+    const key=`${gx},${gy}`;
+    if(grid.has(key)) return grid.get(key);
+    const id=tiles.length;
+    const x=gx*80;
+    const y=gy*60;
+    const t={gx,gy,x,y,type,id};
+    tiles.push(t);
+    grid.set(key,id);
+    return id;
+  };
+
   const conn=(a,b)=>{
+    if(a===undefined||b===undefined||a===b)return;
     if(!conns[a])conns[a]=[];if(!conns[b])conns[b]=[];
     if(!conns[a].includes(b))conns[a].push(b);
     if(!conns[b].includes(a))conns[b].push(a);
   };
-  const rnd=arr=>arr[Math.floor(Math.random()*arr.length)];
-  const pickT=prog=>{
-    if(prog<0.35)return rnd(['normal','normal','normal','town','shop','quest']);
-    if(prog<0.70)return rnd(['normal','normal','town','quest','mainquest','miniboss']);
-    return rnd(['normal','quest','mainquest','miniboss','boss']);
+
+  const DIRS=[{x:1,y:0},{x:-1,y:0},{x:0,y:1},{x:0,y:-1}];
+  const ALL_DIRS=[...DIRS, {x:1,y:1},{x:1,y:-1},{x:-1,y:1},{x:-1,y:-1}];
+
+  // Helper to check if a spot is clear of any neighbors
+  const isClear=(gx, gy, exceptId)=>{
+    for(const d of ALL_DIRS) {
+      const nid = grid.get(`${gx+d.x},${gy+d.y}`);
+      if(nid !== undefined && nid !== exceptId) return false;
+    }
+    return true;
   };
 
-  // ── Pure Monopoly snake: tiles touch edge-to-edge, no gaps ──
-  const TW = TS*2+6;   // tile width (includes border)
-  const TH = TS*2+6;   // tile height
-  const PAD = 28;      // outer board margin
+  // 1. Start with a horizontal segment
+  let prevId = mkT(0,0,'normal');
+  for(let i=1; i<10; i++) {
+    let nextId = mkT(i,0,'normal');
+    conn(prevId, nextId);
+    prevId = nextId;
+  }
 
-  // Fit as many columns/rows as possible
-  const COLS = Math.max(4, Math.floor((W - PAD*2) / TW));
-  const ROWS = Math.max(3, Math.floor((H - PAD*2) / TH));
+  // 2. Grow crossword segments
+  let attempts = 0;
+  while(tiles.length < 245 && attempts < 2000) {
+    attempts++;
+    const parentId = Math.floor(Math.random() * tiles.length);
+    const parent = tiles[parentId];
+    const dir = DIRS[Math.floor(Math.random() * DIRS.length)];
+    
+    // Crossword: try to grow perpendicular to parent's existing connections
+    const pConns = conns[parentId] || [];
+    const isPerp = pConns.every(cid => {
+      const c = tiles[cid];
+      return (c.gx === parent.gx) !== (dir.x === 0);
+    });
+    if(!isPerp && Math.random() > 0.2) continue;
 
-  // Adjust TW/TH slightly so tiles perfectly fill the board
-  const tileW = Math.floor((W - PAD*2) / COLS);
-  const tileH = Math.floor((H - PAD*2) / ROWS);
+    const len = Math.floor(Math.random() * 8) + 4;
+    let word = [];
+    let valid = true;
+    let lastGx = parent.gx;
+    let lastGy = parent.gy;
 
-  // Build snake positions — bottom row L→R, then snake upward
-  const positions = [];
-  for(let row = ROWS-1; row >= 0; row--){
-    const rowNum = ROWS-1-row;            // 0 = bottom row
-    const startX = PAD + tileW/2;
-    const y = PAD + tileH/2 + row*tileH;
-    if(rowNum % 2 === 0){
-      // left → right
-      for(let col=0; col<COLS; col++)
-        positions.push({x: startX + col*tileW, y});
-    } else {
-      // right → left
-      for(let col=COLS-1; col>=0; col--)
-        positions.push({x: startX + col*tileW, y});
+    for(let i=1; i<=len; i++) {
+      const nx = parent.gx + dir.x * i;
+      const ny = parent.gy + dir.y * i;
+      const existingId = grid.get(`${nx},${ny}`);
+
+      if(existingId !== undefined) {
+        // Intersecting! This is a crossroad.
+        word.push({gx:nx, gy:ny, id:existingId, isIntersection: true});
+        break; 
+      }
+
+      // Check for "fatness": new tile should not have neighbors other than its predecessor
+      let ok = true;
+      for(const d of ALL_DIRS) {
+        const cx = nx + d.x;
+        const cy = ny + d.y;
+        
+        if(cx === lastGx && cy === lastGy) continue; // predecessor is allowed
+        
+        if(grid.has(`${cx},${cy}`)) {
+          ok = false; break;
+        }
+        
+        // Also check against tiles currently being added to the word
+        if(word.some((w, idx) => idx < word.length - 1 && w.gx === cx && w.gy === cy)) {
+          ok = false; break;
+        }
+      }
+
+      if(!ok) {
+        valid = false;
+        break;
+      }
+
+      word.push({gx:nx, gy:ny, type:'normal'});
+      lastGx = nx;
+      lastGy = ny;
+    }
+
+    if(valid && word.length > 2) {
+      let curPrevId = parentId;
+      word.forEach(w => {
+        const id = w.id !== undefined ? w.id : mkT(w.gx, w.gy, w.type);
+        conn(curPrevId, id);
+        curPrevId = id;
+      });
     }
   }
 
-  const total = positions.length;
-
-  // Assign types
-  for(let i=0; i<total; i++){
-    let type;
-    const prog = i/total;
-    if(i===0) type='start';
-    else if(i===total-1) type='boss';
-    else{
-      type = pickT(prog);
-      // Guaranteed specials at regular intervals
-      if(i % 7 === 3) type='town';
-      if(i % 11 === 5) type='shop';
-      if(i === Math.floor(total*0.40)) type='miniboss';
-      if(i === Math.floor(total*0.72)) type='miniboss';
-      if(i === Math.floor(total*0.55)) type='boss';
+  // 3. Place 3 main bosses aside
+  let bossesPlaced=0;
+  let bAttempts=0;
+  while(bossesPlaced<3 && bAttempts<1000){
+    bAttempts++;
+    const t=tiles[Math.floor(Math.random()*tiles.length)];
+    if(t.type!=='normal') continue;
+    if(Math.abs(t.gx)+Math.abs(t.gy)<25)continue;
+    
+    const dir=DIRS[Math.floor(Math.random()*DIRS.length)];
+    const bx=t.gx+dir.x, by=t.gy+dir.y;
+    if(!grid.has(`${bx},${by}`) && isClear(bx, by, t.id)){
+      const bossId=mkT(bx,by,'boss');
+      conn(t.id,bossId);
+      bossesPlaced++;
     }
-    mkT(positions[i].x, positions[i].y, type);
   }
 
-  // Connect linearly (each tile connects to next)
-  for(let i=0; i<tiles.length-1; i++) conn(i, i+1);
+  // 4. Distribute special tiles
+  tiles.forEach(t=>{
+    if(t.type==='normal'){
+      const r=Math.random();
+      if(r<0.05)t.type='town';
+      else if(r<0.10)t.type='shop';
+      else if(r<0.16)t.type='quest';
+      else if(r<0.22)t.type='mainquest';
+      else if(r<0.28)t.type='miniboss';
+    }
+  });
 
-  board.tiles=tiles; board.connections=conns; board.startTile=0;
-  board.forks=[];  // no fork tiles
+  // 5. Identify start tiles (terminal tiles / dead ends)
+  const terminals = tiles.filter(t => (conns[t.id] || []).length === 1 && t.type !== 'boss');
+  board.startTiles = terminals.length > 0 ? terminals.map(t => t.id) : [tiles[0].id];
+  
+  // Update start tiles to be "start" type
+  board.startTiles.forEach(id => tiles[id].type = 'start');
 
-  // Center view on start tile
-  panX = W/2 - tiles[0].x;
-  panY = H/2 - tiles[0].y;
+  board.tiles=tiles;
+  board.connections=conns;
+  board.forks=[];
+  board.tileW=80;
+  board.tileH=60;
+  
+  panX=bCv.width/2;
+  panY=bCv.height/2;
 }
 
 // Pan events
@@ -655,7 +748,30 @@ function drawBoard(){
   if(!board.tiles.length){requestAnimationFrame(drawBoard);return;}
   bCtx.save(); bCtx.translate(panX,panY);
 
-  // Draw all tiles (they touch — no road drawing needed)
+  // Draw path connections between tiles
+  const drawnEdges=new Set();
+  Object.entries(board.connections).forEach(([fi,tos])=>{
+    const f=board.tiles[parseInt(fi)];
+    tos.forEach(ti=>{
+      const key=Math.min(parseInt(fi),ti)+'-'+Math.max(parseInt(fi),ti);
+      if(drawnEdges.has(key))return;
+      drawnEdges.add(key);
+      const tt=board.tiles[ti];
+      // Outer dark road border
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#3a2208';bCtx.lineWidth=8;bCtx.lineCap='round';bCtx.stroke();
+      // Inner golden road
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='#b87c28';bCtx.lineWidth=4;bCtx.stroke();
+      // Dashed centre line
+      bCtx.setLineDash([8,6]);
+      bCtx.beginPath();bCtx.moveTo(f.x,f.y);bCtx.lineTo(tt.x,tt.y);
+      bCtx.strokeStyle='rgba(255,240,160,0.35)';bCtx.lineWidth=1.5;bCtx.stroke();
+      bCtx.setLineDash([]);bCtx.lineCap='butt';
+    });
+  });
+
+  // Draw tiles
   board.tiles.forEach((t,i)=>drawTile(t,i,GS.highlightedTiles?.includes(i)));
 
   // Draw hero sprites on top
@@ -693,15 +809,9 @@ const TILE_LABELS = {
 
 function drawTile(t,idx,hl){
   const {x,y}=t;
-  // Compute tile bounds from genBoard tileW/tileH
-  // Since tiles are center-positioned, half-extents:
   if(!board.tiles.length)return;
-  // Recover tileW/H from adjacent tile spacing or use TS
-  const W=bCv.width,H=bCv.height,COLS=Math.max(4,Math.floor((W-56)/(TS*2+6)));
-  const tileW=Math.floor((W-56)/COLS);
-  const PAD=28;
-  const ROWS=Math.max(3,Math.floor((H-56)/(TS*2+6)));
-  const tileH=Math.floor((H-56)/ROWS);
+  const tileW=board.tileW||80;
+  const tileH=board.tileH||60;
   const hw=tileW/2, hh=tileH/2;
   const tx=x-hw, ty=y-hh;
   const tc=TILE_COLORS[t.type]||TILE_COLORS.normal;
@@ -1002,9 +1112,10 @@ function renderForms(){
   const cols=['#9a3a3a','#3a5a9a','#3a9a5a','#9a8a3a','#7a3a9a'];
   pForms=[];
   for(let i=0;i<playerCount;i++){
-    pForms.push({cls:'warrior',alloc:{str:0,int:0,dex:0,hp:0},pts:2});
-    const card=document.createElement('div');card.className='pcard';card.style.borderColor=cols[i]+'66';
-    card.innerHTML=`<div class="plbl" style="color:${cols[i]}">Player ${i+1}</div>
+    const pColor = cols[i];
+    pForms.push({cls:'warrior',alloc:{str:0,int:0,dex:0,hp:0},pts:2, color: pColor});
+    const card=document.createElement('div');card.className='pcard';card.style.borderColor=pColor+'66';
+    card.innerHTML=`<div class="plbl" style="color:${pColor}">Player ${i+1}</div>
       <div class="sprite-wrap" id="sprWrap${i}"></div>
       <input class="pname-in" id="pn${i}" type="text" placeholder="Name..." value="Hero ${i+1}" maxlength="12">
       <div id="clsRow${i}">${Object.entries(CLASSES).map(([k,v])=>`<button class="cls-btn${k==='warrior'?' sel':''}" id="clb${i}_${k}" onclick="selCls(${i},'${k}')">${v.icon} ${v.name}</button>`).join('')}</div>
@@ -1014,13 +1125,14 @@ function renderForms(){
         <div class="pts-left" id="pts${i}">✦ 2 points</div>
       </div>`;
     row.appendChild(card);
-    card.querySelector(`#sprWrap${i}`).appendChild(renderSprite('warrior',40));
+    card.querySelector(`#sprWrap${i}`).appendChild(renderSprite('warrior', 40, pColor));
   }
 }
 function selCls(pi,cls){
   pForms[pi].cls=cls;
+  const pColor = pForms[pi].color;
   ['mage','warrior','ranger','monk'].forEach(c=>{const b=document.getElementById(`clb${pi}_${c}`);if(b)b.className='cls-btn'+(c===cls?' sel':'');});
-  const wrap=document.getElementById(`sprWrap${pi}`);wrap.innerHTML='';wrap.appendChild(renderSprite(cls,40));
+  const wrap=document.getElementById(`sprWrap${pi}`);wrap.innerHTML='';wrap.appendChild(renderSprite(cls, 40, pColor));
 }
 function adj(pi,s,d){
   const pf=pForms[pi];const cur=pf.alloc[s]||0;
@@ -1039,10 +1151,24 @@ function startGame(){
     const pf=pForms[i];
     const nm=document.getElementById(`pn${i}`).value.trim()||`Hero ${i+1}`;
     const cls=pf.cls||'warrior';const base=CLASSES[cls];
-    GS.players.push({name:nm,class:cls,color:CLASSES[cls].color,allocStr:pf.alloc.str||0,allocInt:pf.alloc.int||0,allocDex:pf.alloc.dex||0,maxHp:base.hp+(pf.alloc.hp||0)*10,hp:base.hp+(pf.alloc.hp||0)*10,maxMp:base.mp,mp:base.mp,gold:80,inventory:[],equipped:{weapon:null,head:null,body:null,feet:null,accessory:null},bossesDefeated:0,tileIdx:0,skipTurns:0,moveBonus:0,rollBonus:0,visitHistory:[],poison:0});
+    const pColor = pf.color || base.color;
+    GS.players.push({name:nm,class:cls,color:pColor,allocStr:pf.alloc.str||0,allocInt:pf.alloc.int||0,allocDex:pf.alloc.dex||0,maxHp:base.hp+(pf.alloc.hp||0)*10,hp:base.hp+(pf.alloc.hp||0)*10,maxMp:base.mp,mp:base.mp,gold:80,inventory:[],equipped:{weapon:null,head:null,body:null,feet:null,accessory:null},bossesDefeated:0,tileIdx:0,skipTurns:0,moveBonus:0,rollBonus:0,visitHistory:[],poison:0});
   }
   showS('gameScreen');
-  setTimeout(()=>{genBoard();GS.players.forEach(p=>{p.tileIdx=board.startTile;});GS.phase='initiative';drawBoard();rollInit();},120);
+  setTimeout(()=>{
+    genBoard();
+    GS.players.forEach((p, i)=>{
+      const sIdx = i % board.startTiles.length;
+      p.tileIdx = board.startTiles[sIdx];
+    });
+    GS.phase='initiative';
+    drawBoard();
+    rollInit();
+    // Center on first player's start tile
+    const startT = board.tiles[GS.players[0].tileIdx];
+    panX = bCv.width/2 - startT.x;
+    panY = bCv.height/2 - startT.y;
+  },120);
 }
 
 function cp(){return GS.players[GS.curP];}
@@ -1140,7 +1266,14 @@ function doNormal(){
   const ev=wRand(NORMAL_EV),p=cp();
   if(ev.t==='nothing'){openModal('🌿 Uneventful','Nothing eventful happens along the road.',[{label:'Continue',fn:closeEndTurn}]);}
   else if(ev.t==='rob'){const lost=Math.max(5,Math.floor(p.gold*.2));p.gold=Math.max(0,p.gold-lost);openModal('🗡️ Ambush!',`Bandits steal ${lost} gold!`,[{label:'Curse them!',fn:closeEndTurn}]);toast(`${p.name} lost ${lost} gold!`,'bad');}
-  else if(ev.t==='tunnel'){p.tileIdx=Math.min(p.tileIdx+10,board.tiles.length-1);openModal('🕳️ Secret Tunnel!','A hidden tunnel — leap forward 10 tiles!',[{label:'Excellent!',fn:closeEndTurn}]);toast(`${p.name} advanced 10 tiles!`,'good');}
+  else if(ev.t==='tunnel'){
+    // Find a tile at least 8 steps away in the graph if possible
+    const reach=getReach(p.tileIdx,10);
+    const target=reach.length?reach[Math.floor(Math.random()*reach.length)]:p.tileIdx;
+    p.tileIdx=target;
+    openModal('🕳️ Secret Tunnel!','A hidden tunnel — you emerge elsewhere!',[{label:'Excellent!',fn:closeEndTurn}]);
+    toast(`${p.name} traveled through a tunnel!`,'good');
+  }
   else if(ev.t==='gold'){const g=20+Math.floor(Math.random()*30);p.gold+=g;openModal('💰 Found Gold!',`You find ${g} gold coins!`,[{label:'Lucky!',fn:closeEndTurn}]);toast(`${p.name} found ${g} gold!`,'good');}
   updPlayers();
 }
